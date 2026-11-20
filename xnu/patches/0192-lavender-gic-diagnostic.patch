@@ -1,0 +1,61 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 407ab8c..2eaf434 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -40,6 +40,23 @@ sweet_psci_cpu_on(uint64_t target, uint64_t entry, uint64_t context)
+ 	return (int32_t)x0;
+ }
+ 
++#define SWEET_MRS(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " #r : "=r"(_v)); _v; })
++
++static void
++sweet_gic_report(const char *when)
++{
++	kprintf("SWEET GIC[%s]: EL=%llu DAIF=%llx IRQen=%u cpu=%d sigen=%u\n", when,
++	    SWEET_MRS(CurrentEL) >> 2, SWEET_MRS(DAIF), (unsigned)ml_get_interrupts_enabled(),
++	    (int)cpu_number(), (unsigned)sweet_cpu_signal_is_enabled(0));
++	kprintf("  ICC SRE=%llx CTLR=%llx PMR=%llx BPR1=%llx IGRPEN1=%llx HPPIR1=%llx RPR=%llx\n",
++	    SWEET_MRS(ICC_SRE_EL1), SWEET_MRS(ICC_CTLR_EL1), SWEET_MRS(ICC_PMR_EL1),
++	    SWEET_MRS(ICC_BPR1_EL1), SWEET_MRS(ICC_IGRPEN1_EL1), SWEET_MRS(ICC_HPPIR1_EL1),
++	    SWEET_MRS(ICC_RPR_EL1));
++	kprintf("  TIMER FRQ=%llu VCT=%llx CTL=%llx CVAL=%llx KCTL=%llx\n",
++	    SWEET_MRS(CNTFRQ_EL0), SWEET_MRS(CNTVCT_EL0), SWEET_MRS(CNTV_CTL_EL0),
++	    SWEET_MRS(CNTV_CVAL_EL0), SWEET_MRS(CNTKCTL_EL1));
++}
++
+ class SweetCPU : public IOCPU {
+ 	OSDeclareDefaultStructors(SweetCPU);
+ 	const OSSymbol *cpuName = NULL;
+@@ -160,14 +177,23 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 		}
+ 		/* processor_start() is asynchronous for secondaries in this XNU. */
+ 		nanoseconds_to_deadline(5 * NSEC_PER_SEC, &deadline);
++		uint64_t next_report;
++		nanoseconds_to_deadline(1 * NSEC_PER_SEC, &next_report);
++		sweet_gic_report("wait start");
+ 		while (__atomic_load_n(&cpu->initialized, __ATOMIC_ACQUIRE) == 0 ||
+ 		    !sweet_cpu_signal_is_enabled(i)) {
+ 			if (mach_absolute_time() > deadline) {
++				sweet_gic_report("TIMEOUT");
+ 				IOLog("SWEET CPU: cpu=%u mpidr=0x%x NOT alive after 5s\n",
+ 				    i, topology->cpus[i].phys_id);
+ 				panic("SWEET CPU: cpu=%u startup timeout (reset/MMU/GIC/SGI)", i);
+ 			}
+-			IOSleep(1);
++			/* IOSleep() needs a timer interrupt: spin on the counter so a dead timer cannot hide the timeout */
++			if (mach_absolute_time() > next_report) {
++				sweet_gic_report("waiting");
++				nanoseconds_to_deadline(1 * NSEC_PER_SEC, &next_report);
++			}
++			__builtin_arm_isb(ISB_SY);
+ 		}
+ 		IOLog("SWEET CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK\n",
+ 		    i, topology->cpus[i].phys_id);
+@@ -203,6 +229,7 @@ SweetCPU::initCPU(bool boot)
+ 	 * startAll waits for its delivery after the startup thread unmasks IRQs.
+ 	 * Waiting here with DAIF.I set would deadlock every secondary. */
+ 	signalCPU(this);
++	sweet_gic_report("after SGI1 send");
+ 	setCPUState(kIOCPUStateRunning);
+ 	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
+ 	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
