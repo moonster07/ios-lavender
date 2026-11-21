@@ -1,0 +1,81 @@
+--- a/bsd/dev/santoni_touch.c
++++ b/bsd/dev/santoni_touch.c
+@@ -916,7 +916,76 @@
+ }
+ 
+-/* The probe loop calls nvt_flat_report(); make it run the paged probe too. */
++/*
++ * 0195: the touch buffer (page 0x021c, offset 0) read ~1500 times in a row at
++ * 0x01. A single read per loop can miss a tap, so this prints a line only
++ * when the six bytes CHANGE: ff ff ff ff ff ff is "no finger". The first
++ * line is the baseline; with a finger down more lines appear, decoded as
++ * slot / state / x / y (record layout from memory - check the raw bytes).
++ */
++#define NVT_POLLS 1500
++#define NVT_POLL_LINES 30
++
++static int nvt_probed;
++
++static void
++nvt_poll(void)
++{
++        uint8_t cur[6], prev[6], fw[2];
++        int n, i, err, same, changed = 0, lines = 0, errs = 0;
++
++        for (i = 0; i < 6; i++) {
++                cur[i] = 0;
++                prev[i] = 0xfe;
++        }
++        fw[0] = fw[1] = 0;
++        err = nvt_pg_read(0x01, 0x02, 0x1c, 0x60, fw, 2);
++        printf("WHYRED TOUCH: NVTT start fw err %d: %02x %02x\n", err, fw[0],
++            fw[1]);
++        for (n = 0; n < NVT_POLLS; n++) {
++                err = nvt_pg_read(0x01, 0x02, 0x1c, 0x00, cur, 6);
++                if (err) {
++                        errs++;
++                        continue;
++                }
++                same = 1;
++                for (i = 0; i < 6; i++) {
++                        if (cur[i] != prev[i]) {
++                                same = 0;
++                        }
++                }
++                if (same) {
++                        continue;
++                }
++                changed++;
++                for (i = 0; i < 6; i++) {
++                        prev[i] = cur[i];
++                }
++                if (lines >= NVT_POLL_LINES) {
++                        continue;
++                }
++                lines++;
++                printf("WHYRED TOUCH: NVTT #%d %02x %02x %02x %02x %02x %02x",
++                    n, cur[0], cur[1], cur[2], cur[3], cur[4], cur[5]);
++                if (cur[0] != 0xff) {
++                        printf(" s%d t%d x%d y%d", cur[0] >> 3, cur[0] & 7,
++                            (cur[1] << 4) | (cur[3] >> 4),
++                            (cur[2] << 4) | (cur[3] & 0x0f));
++                }
++                printf("\n");
++        }
++        printf("WHYRED TOUCH: NVTT end polls %d changes %d errs %d\n",
++            NVT_POLLS, changed, errs);
++}
++
++/* The probe loop calls nvt_flat_report(); also poll the touch buffer. */
+ #define nvt_flat_report() \
+-        do { nvt_flat_report(); nvt_pg_probe(); } while (0)
++        do { \
++                nvt_flat_report(); \
++                if (!nvt_probed) { \
++                        nvt_probed = 1; \
++                        nvt_pg_probe(); \
++                } \
++                nvt_poll(); \
++        } while (0)
+ 
+ static int
