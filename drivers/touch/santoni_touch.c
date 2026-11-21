@@ -776,6 +776,57 @@ panel_band(uint32_t colour)
 	}
 }
 
+/*
+ * Novatek NT36672A flat register map (as in mainline novatek-nvt-ts): one
+ * address byte, no page select. 0x78 holds 15 parameter bytes (width at +4,
+ * height at +6, chip ID at +0x0e); 0x00 holds the touch records.
+ */
+#define NVT_FLAT_PARAMS 0x78
+#define NVT_FLAT_PARAMS_LEN 15
+#define NVT_FLAT_TOUCH 0x00
+
+static uint8_t nvt_addr;
+static uint8_t nvt_par[NVT_FLAT_PARAMS_LEN];
+static uint8_t nvt_touch[6];
+
+static void
+nvt_flat_identify(uint8_t addr)
+{
+	int i, err;
+
+	nvt_addr = addr;
+	err = dsx_read_ex(addr, NVT_FLAT_PARAMS, nvt_par,
+	    NVT_FLAT_PARAMS_LEN, 0, 1);
+	printf("WHYRED TOUCH: NVT params at 0x%02x err %d:", addr, err);
+	for (i = 0; i < NVT_FLAT_PARAMS_LEN; i++) {
+		printf(" %02x", nvt_par[i]);
+	}
+	printf("\n");
+}
+
+static void
+nvt_flat_report(void)
+{
+	int err, x, y;
+
+	if (nvt_addr == 0) {
+		return;
+	}
+	err = dsx_read_ex(nvt_addr, NVT_FLAT_TOUCH, nvt_touch,
+	    sizeof(nvt_touch), 0, 1);
+	printf("WHYRED TOUCH: NVT %dx%d chip %02x; touch err %d: "
+	    "%02x %02x %02x %02x %02x %02x\n",
+	    (nvt_par[4] << 8) | nvt_par[5], (nvt_par[6] << 8) | nvt_par[7],
+	    nvt_par[14], err, nvt_touch[0], nvt_touch[1], nvt_touch[2],
+	    nvt_touch[3], nvt_touch[4], nvt_touch[5]);
+	if (err == 0 && nvt_touch[0] != 0xff) {
+		x = (nvt_touch[1] << 4) | (nvt_touch[3] >> 4);
+		y = (nvt_touch[2] << 4) | (nvt_touch[3] & 0x0f);
+		printf("WHYRED TOUCH: NVT slot %d type %d x %d y %d\n",
+		    nvt_touch[0] >> 3, nvt_touch[0] & 7, x, y);
+	}
+}
+
 static int
 panel_report(int acks, uint8_t first)
 {
@@ -874,6 +925,9 @@ santoni_touch_probe(void)
 
 	printf("WHYRED TOUCH: scan done, %d address(es) acknowledged; sda %d "
 	    "scl %d\n", acks, pin_read(&touch_sda), pin_read(&touch_scl));
+	if (acks > 0 && !saw_rmi) {
+		nvt_flat_identify(first_ack);
+	}
 
 	if (saw_rmi) {
 		touch_irq_setup(north);
@@ -908,6 +962,7 @@ santoni_touch_probe(void)
 			    "scl=%d id=%02x%02x%02x\n", acks, first_ack,
 			    pin_read(&touch_sda), pin_read(&touch_scl), id[0],
 			    id[1], id[2]);
+			nvt_flat_report();
 			delay(2000000);
 		}
 	}
