@@ -11,7 +11,7 @@ index e147227..6eeb11e 100644
 +
 +int santoni_touch_probe(void);
 +
- #if defined(ARM64_BOARD_CONFIG_WHYRED)
+ #if (defined(ARM64_BOARD_CONFIG_WHYRED) || defined(ARM64_BOARD_CONFIG_LAVENDER))
  
  #include <sys/param.h>
  #include <sys/systm.h>
