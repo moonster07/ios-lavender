@@ -1,0 +1,44 @@
+--- a/bsd/dev/santoni_touch.c
++++ b/bsd/dev/santoni_touch.c
+@@ -828,4 +828,41 @@ nvt_flat_report
+ }
+ 
++/*
++ * 0194: does a read depend on the address? Read-only. Every loop prints
++ * 15 bytes from several registers (0x78 twice) so one photo is enough:
++ * different bytes per address means the read path works, identical
++ * bytes everywhere means it does not.
++ */
++static void
++nvt_flat_matrix(void)
++{
++        static const uint8_t regs[] = {
++                0x00, 0x01, 0x02, 0x40, 0x78, 0x79, 0x7a, 0x78
++        };
++        uint8_t b[NVT_FLAT_PARAMS_LEN];
++        int i, j, err;
++
++        if (nvt_addr == 0) {
++                return;
++        }
++        printf("WHYRED TOUCH: NVTM ----\n");
++        for (i = 0; i < (int)(sizeof(regs) / sizeof(regs[0])); i++) {
++                for (j = 0; j < NVT_FLAT_PARAMS_LEN; j++) {
++                        b[j] = 0;
++                }
++                err = dsx_read_ex(nvt_addr, regs[i], b, NVT_FLAT_PARAMS_LEN,
++                    0, 1);
++                printf("WHYRED TOUCH: NVTM %02x err %d:", regs[i], err);
++                for (j = 0; j < NVT_FLAT_PARAMS_LEN; j++) {
++                        printf(" %02x", b[j]);
++                }
++                printf("\n");
++        }
++}
++
++/* The probe loop calls nvt_flat_report(); make it print the matrix too. */
++#define nvt_flat_report() \
++        do { nvt_flat_report(); nvt_flat_matrix(); } while (0)
++
+ static int
+ panel_report(int acks, uint8_t first)
