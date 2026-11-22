@@ -1,0 +1,80 @@
+--- a/bsd/dev/santoni_touch.c
++++ b/bsd/dev/santoni_touch.c
+@@ -978,4 +978,71 @@
+ }
+ 
++/*
++ * 0196: after a boot the controller can sit in its bootloader (answers at
++ * 0x62, nothing at 0x01) and never start its firmware. The nt36xxx driver
++ * starts it by writing the "bootloader reset" command 0x69 to the 0x62
++ * endpoint, waiting 35 ms, then waiting for the firmware state at 0x01 to
++ * reach 0xa0..0xaf (it allows 50 x 10 ms). The vendor driver sends the two
++ * bytes 00 69; the mainline one sends <0x62> 69 - so try the vendor form
++ * first and the mainline form on a second attempt. At most two attempts per
++ * boot; every step is printed on one "NVTR" line.
++ */
++static int nvt_resets;
++
++static int
++nvt_hw_cmd(uint8_t first, uint8_t cmd)
++{
++        int ok = 1;
++
++        i2c_start();
++        ok &= i2c_write((uint8_t)(0x62 << 1));
++        ok &= i2c_write(first);
++        ok &= i2c_write(cmd);
++        i2c_stop();
++        return ok ? 0 : 5;
++}
++
++/* Returns the firmware state (0xa0..0xaf) when 0x01 answers, else -1. */
++static int
++nvt_fw_state(void)
++{
++        uint8_t b[2];
++
++        b[0] = b[1] = 0;
++        if (!i2c_ack(0x01)) {
++                return -1;
++        }
++        if (nvt_pg_read(0x01, 0x02, 0x1c, 0x60, b, 2) != 0) {
++                return -1;
++        }
++        if (b[0] < 0xa0 || b[0] > 0xaf) {
++                return -1;
++        }
++        return b[0];
++}
++
++static void
++nvt_boot_fw(void)
++{
++        uint8_t first;
++        int err, n, st = -1;
++
++        if (nvt_fw_state() >= 0 || nvt_resets >= 2) {
++                return;
++        }
++        first = (nvt_resets == 0) ? 0x00 : 0x62;
++        nvt_resets++;
++        err = nvt_hw_cmd(first, 0x69);
++        delay(35000);
++        for (n = 0; n < 50 && st < 0; n++) {
++                st = nvt_fw_state();
++                if (st < 0) {
++                        delay(10000);
++                }
++        }
++        printf("WHYRED TOUCH: NVTR try %d first %02x wr err %d tries %d "
++            "fw state %02x\n", nvt_resets, first, err, n, st & 0xff);
++}
++
+ /* The probe loop calls nvt_flat_report(); also poll the touch buffer. */
+ #define nvt_flat_report() \
+@@ -986,4 +1053,5 @@
+                         nvt_pg_probe(); \
+                 } \
++                nvt_boot_fw(); \
+                 nvt_poll(); \
+         } while (0)
