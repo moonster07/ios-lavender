@@ -1,16 +1,18 @@
 diff --git a/bsd/dev/santoni_touch.c b/bsd/dev/santoni_touch.c
-index cb5893e..de91294 100644
+index cb5893e..d28f605 100644
 --- a/bsd/dev/santoni_touch.c
 +++ b/bsd/dev/santoni_touch.c
-@@ -54,6 +54,7 @@ int santoni_touch_probe(void);
+@@ -54,6 +54,9 @@ int santoni_touch_probe(void);
  #include <sys/param.h>
  #include <sys/systm.h>
  #include <kern/clock.h>
 +#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <mach/thread_act.h>
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
  #include <vm/memory_types.h>
-@@ -1067,6 +1068,115 @@ panel_report(int acks, uint8_t first)
+@@ -1067,6 +1070,115 @@ panel_report(int acks, uint8_t first)
  	    acks > 0 ? 0xff20e020 : 0xffe02020);
  }
  
@@ -126,7 +128,7 @@ index cb5893e..de91294 100644
  int
  santoni_touch_probe(void)
  {
-@@ -1082,6 +1192,16 @@ santoni_touch_probe(void)
+@@ -1082,6 +1194,16 @@ santoni_touch_probe(void)
  	if (touch_probe_done) {
  		return 0;
  	}
