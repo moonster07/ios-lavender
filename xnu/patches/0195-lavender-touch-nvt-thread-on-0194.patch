@@ -1,0 +1,208 @@
+diff --git a/bsd/dev/santoni_touch.c b/bsd/dev/santoni_touch.c
+index 99a2c88..e25442f 100644
+--- a/bsd/dev/santoni_touch.c
++++ b/bsd/dev/santoni_touch.c
+@@ -54,6 +54,9 @@ int santoni_touch_probe(void);
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <mach/thread_act.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <vm/memory_types.h>
+@@ -930,6 +933,176 @@ panel_report(int acks, uint8_t first)
+ 	    acks > 0 ? 0xff20e020 : 0xffe02020);
+ }
+ 
++/*
++ * 0196 (thread-only variant): start the NVT firmware when 0x01 is silent by
++ * writing 00 69 to the 0x62 endpoint, waiting 35 ms, then polling the
++ * firmware state at 0x01 (0xa0..0xaf) for up to 50 x 10 ms.
++ */
++static int nvt_resets;
++
++static int
++nvt_hw_cmd(uint8_t first, uint8_t cmd)
++{
++	int ok = 1;
++
++	i2c_start();
++	ok &= i2c_write((uint8_t)(0x62 << 1));
++	ok &= i2c_write(first);
++	ok &= i2c_write(cmd);
++	i2c_stop();
++	return ok ? 0 : 5;
++}
++
++static int
++nvt_fw_state(void)
++{
++	uint8_t b[2];
++
++	b[0] = b[1] = 0;
++	if (!i2c_ack(0x01)) {
++		return -1;
++	}
++	if (nvt_pg_read(0x01, 0x02, 0x1c, 0x60, b, 2) != 0) {
++		return -1;
++	}
++	if (b[0] < 0xa0 || b[0] > 0xaf) {
++		return -1;
++	}
++	return b[0];
++}
++
++static void
++nvt_boot_fw(void)
++{
++	uint8_t first;
++	int err, n, st = -1;
++
++	if (nvt_fw_state() >= 0 || nvt_resets >= 2) {
++		return;
++	}
++	first = (nvt_resets == 0) ? 0x00 : 0x62;
++	nvt_resets++;
++	err = nvt_hw_cmd(first, 0x69);
++	delay(35000);
++	for (n = 0; n < 50 && st < 0; n++) {
++		st = nvt_fw_state();
++		if (st < 0) {
++			delay(10000);
++		}
++	}
++	printf("WHYRED TOUCH: NVTR try %d first %02x wr err %d tries %d "
++	    "fw state %02x\n", nvt_resets, first, err, n, st & 0xff);
++}
++
++/*
++ * 0197: late-starting NVT touch thread. Boot arg sweetouchnvt=1 (do not
++ * combine with sweetouchi2c=1; both bit-bang the same pins). Optional
++ * sweettouchdelay=N seconds before it starts (default 45).
++ */
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++
++#define NVT_FINGERS 10
++
++static void
++nvt_touch_thread(void *arg, wait_result_t result)
++{
++	uint32_t delay_s = 45;
++	uint8_t rec[6 * NVT_FINGERS];
++	int px[NVT_FINGERS], py[NVT_FINGERS];
++	uint32_t down = 0, seen, errs = 0;
++	vm_offset_t south;
++	int i, err;
++
++	(void)arg;
++	(void)result;
++	for (i = 0; i < NVT_FINGERS; i++) {
++		px[i] = py[i] = 0;
++	}
++	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	printf("WHYRED TOUCH: NVTH starting in %u s\n", delay_s);
++	delay_for_interval(delay_s * 1000, NSEC_PER_MSEC);
++
++	south = ml_io_map_unmappable(WHYRED_TLMM_BASE + WHYRED_TLMM_SOUTH,
++	    0x10000, VM_WIMG_IO);
++	if (south == 0) {
++		printf("WHYRED TOUCH: NVTH TLMM map failed\n");
++		goto out;
++	}
++	pin_setup(&touch_sda, south, WHYRED_SDA);
++	pin_setup(&touch_scl, south, WHYRED_SCL);
++	(void)i2c_clear_bus();
++	nvt_boot_fw();
++	if (nvt_fw_state() < 0) {
++		printf("WHYRED TOUCH: NVTH firmware not running; stopping\n");
++		goto out;
++	}
++	printf("WHYRED TOUCH: NVTH running\n");
++
++	for (;;) {
++		err = nvt_pg_read(0x01, 0x02, 0x1c, 0x00, rec, sizeof(rec));
++		if (err) {
++			if (++errs == 10 && down) {
++				for (i = 0; i < NVT_FINGERS; i++) {
++					if (down & (1u << i)) {
++						sweet_hid_touch(i, 0, px[i], py[i]);
++					}
++				}
++				down = 0;
++			}
++			delay_for_interval(10, NSEC_PER_MSEC);
++			continue;
++		}
++		errs = 0;
++		seen = 0;
++		for (i = 0; i < NVT_FINGERS; i++) {
++			uint8_t *r = &rec[6 * i];
++			int slot = r[0] >> 3, st = r[0] & 7, x, y;
++
++			if (r[0] == 0xff || slot < 1 || slot > NVT_FINGERS ||
++			    (st != 1 && st != 2)) {
++				continue;
++			}
++			x = (r[1] << 4) | (r[3] >> 4);
++			y = (r[2] << 4) | (r[3] & 0x0f);
++			if (x >= 1080 || y >= 2340) {
++				continue;       /* junk, e.g. 4095 */
++			}
++			y = y * 2400 / 2340;
++			if (y > 2399) {
++				y = 2399;
++			}
++			slot--;
++			seen |= 1u << slot;
++			px[slot] = x;
++			py[slot] = y;
++			sweet_hid_touch(slot, 1, x, y);
++		}
++		for (i = 0; i < NVT_FINGERS; i++) {
++			if ((down & ~seen) & (1u << i)) {
++				sweet_hid_touch(i, 0, px[i], py[i]);
++			}
++		}
++		down = seen;
++		delay_for_interval(10, NSEC_PER_MSEC);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++nvt_touch_start(void)
++{
++	thread_t thread;
++
++	if (kernel_thread_start(nvt_touch_thread, NULL, &thread) ==
++	    KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("WHYRED TOUCH: NVTH thread start failed\n");
++	}
++}
++
+ int
+ santoni_touch_probe(void)
+ {
+@@ -945,6 +1118,16 @@ santoni_touch_probe(void)
+ 	if (touch_probe_done) {
+ 		return 0;
+ 	}
++	{
++		uint32_t nvt = 0;
++
++		if (PE_parse_boot_argn("sweetouchnvt", &nvt, sizeof(nvt)) &&
++		    nvt) {
++			touch_probe_done = 1;
++			nvt_touch_start();
++			return 0;
++		}
++	}
+ 	if (!PE_parse_boot_argn("sweetouchi2c", &on, sizeof(on)) || !on) {
+ 		return 0;
+ 	}
